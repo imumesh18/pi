@@ -5,10 +5,30 @@ import type { ImageModel, ImagesContext } from "../src/types.ts";
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
 	lastRequestOptions: undefined as unknown,
+	lastPostPath: undefined as string | undefined,
 }));
 
 vi.mock("openai", () => {
 	class FakeOpenAI {
+		post = (path: string, requestOptions: { body?: unknown; signal?: AbortSignal }) => {
+			mockState.lastPostPath = path;
+			mockState.lastParams = requestOptions.body;
+			mockState.lastRequestOptions = requestOptions;
+			return {
+				withResponse: async () => {
+					if (requestOptions.signal?.aborted) throw new Error("Request aborted");
+					return {
+						data: {
+							created: 1,
+							data: [{ b64_json: "ZmFrZS1qcGVn", media_type: "image/jpeg" }, { b64_json: "ZmFrZS1wbmc=" }],
+							usage: { prompt_tokens: 12, completion_tokens: 34, total_tokens: 46 },
+						},
+						response: { status: 200, headers: new Headers() },
+					};
+				},
+			};
+		};
+
 		chat = {
 			completions: {
 				create: (params: unknown, requestOptions?: unknown) => {
@@ -62,6 +82,7 @@ describe("openrouter images", () => {
 	beforeEach(() => {
 		mockState.lastParams = undefined;
 		mockState.lastRequestOptions = undefined;
+		mockState.lastPostPath = undefined;
 	});
 
 	it("returns text plus images in final output", async () => {
@@ -95,18 +116,25 @@ describe("openrouter images", () => {
 		expect(params.stream).toBe(false);
 		expect(params.modalities).toEqual(["image", "text"]);
 		expect(params.messages?.[0]?.content?.[0]).toMatchObject({ type: "text", text: "Generate a dog" });
+		expect(mockState.lastPostPath).toBeUndefined();
 	});
 
-	it("passes through abort signal and returns aborted result", async () => {
+	// One model per endpoint: chat completions, then the Images API.
+	it.each<Pick<ImageModel<"openrouter-images">, "id" | "name" | "output">>([
+		{
+			id: "google/gemini-3.1-flash-image-preview",
+			name: "Gemini 3.1 Flash Image Preview",
+			output: ["text", "image"],
+		},
+		{ id: "black-forest-labs/flux.2-pro", name: "FLUX.2 Pro", output: ["image"] },
+	])("passes through abort signal and returns aborted result ($id)", async (variant) => {
 		const model: ImageModel<"openrouter-images"> = {
 			type: "image",
-			id: "black-forest-labs/flux.2-pro",
-			name: "FLUX.2 Pro",
+			...variant,
 			api: "openrouter-images",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			input: ["text", "image"],
-			output: ["image"],
 			cost: { input: 0.015, output: 0.03, cacheRead: 0, cacheWrite: 0 },
 		};
 		const context: ImagesContext = {
@@ -121,7 +149,8 @@ describe("openrouter images", () => {
 		expect(mockState.lastRequestOptions).toMatchObject({ signal: controller.signal });
 	});
 
-	it("generateImages resolves the final assistant images result", async () => {
+	// Regression test for #10652
+	it("sends image-only models to the Images API", async () => {
 		const model: ImageModel<"openrouter-images"> = {
 			type: "image",
 			id: "black-forest-labs/flux.2-pro",
@@ -134,12 +163,42 @@ describe("openrouter images", () => {
 			cost: { input: 0.015, output: 0.03, cacheRead: 0, cacheWrite: 0 },
 		};
 		const context: ImagesContext = {
-			input: [{ type: "text", text: "Generate a dog" }],
+			input: [
+				{ type: "text", text: "Generate a dog" },
+				{ type: "image", mimeType: "image/png", data: "cmVm" },
+				{ type: "text", text: "in this style" },
+			],
 		};
 
 		const output = await generateImages(model, context, { apiKey: "test" });
-		expect(output.output.some((item) => item.type === "image")).toBe(true);
-		// Image-only models must not request text output.
-		expect((mockState.lastParams as { modalities?: string[] }).modalities).toEqual(["image"]);
+		expect(output.stopReason).toBe("stop");
+		expect(output.output).toEqual([
+			{ type: "image", mimeType: "image/jpeg", data: "ZmFrZS1qcGVn" },
+			{ type: "image", mimeType: "image/png", data: "ZmFrZS1wbmc=" },
+		]);
+		expect(output.usage).toMatchObject({ input: 12, output: 34 });
+		expect(mockState.lastPostPath).toBe("/images");
+		expect(mockState.lastParams).toEqual({
+			model: "black-forest-labs/flux.2-pro",
+			prompt: "Generate a dog\nin this style",
+			input_references: [{ type: "image_url", image_url: { url: "data:image/png;base64,cmVm" } }],
+		});
+	});
+
+	it("omits input_references for text-only input", async () => {
+		const model: ImageModel<"openrouter-images"> = {
+			type: "image",
+			id: "openai/gpt-image-2.5-flare",
+			name: "GPT Image 2.5 Flare",
+			api: "openrouter-images",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			input: ["text", "image"],
+			output: ["image"],
+			cost: { input: 8, output: 8, cacheRead: 2, cacheWrite: 0 },
+		};
+
+		await generateImages(model, { input: [{ type: "text", text: "Generate a dog" }] }, { apiKey: "test" });
+		expect(mockState.lastParams).toEqual({ model: "openai/gpt-image-2.5-flare", prompt: "Generate a dog" });
 	});
 });

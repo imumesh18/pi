@@ -54,13 +54,13 @@ describe("provider error body passthrough", () => {
 	it("surfaces the HTTP body reason instead of the opaque SDK message (openrouter images)", async () => {
 		const model: ImageModel<"openrouter-images"> = {
 			type: "image",
-			id: "black-forest-labs/flux.2-pro",
-			name: "FLUX.2 Pro",
+			id: "google/gemini-3.1-flash-image-preview",
+			name: "Gemini 3.1 Flash Image Preview",
 			api: "openrouter-images",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
 			input: ["text", "image"],
-			output: ["image"],
+			output: ["text", "image"],
 			cost: { input: 0.015, output: 0.03, cacheRead: 0, cacheWrite: 0 },
 		};
 		const context: ImagesContext = {
